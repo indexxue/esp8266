@@ -1,0 +1,17 @@
+# Arduino / PlatformIO 常见忽略
+.pio/
+.vscode/
+build/
+*.o
+*.d
+*.elf
+*.bin
+*.map
+*.a
+*.exe
+*.dSYM/
+*.pyc
+__pycache__/
+*.swp
+*.swo
+*~
