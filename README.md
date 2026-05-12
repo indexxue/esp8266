@@ -1,6 +1,6 @@
 # 文档目录
 
-本目录用于存放与 ESP8266 工程相关的 Markdown 说明。下文说明在本工程根目录下，如何用 **PlatformIO** 完成编译、烧录与串口监视。
+本目录用于存放与 ESP8266 工程相关的 Markdown 说明。**开发分层、编码约定、目录与工程规范**见 [`esp8266_embedded_standard.md`](esp8266_embedded_standard.md)。下文说明在本工程根目录下，如何用 **PlatformIO** 完成编译、烧录与串口监视。
 
 ---
 
