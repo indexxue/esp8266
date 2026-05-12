@@ -16,6 +16,12 @@ bool appStaIsConnected() {
   return WiFi.status() == WL_CONNECTED;
 }
 
+void appStaUserDisconnect() {
+  WiFi.persistent(false);
+  WiFi.disconnect(true);
+  s_lastReconnectAttempt = millis();
+}
+
 void appStaLoop() {
   if (WiFi.status() == WL_CONNECTED) {
     return;

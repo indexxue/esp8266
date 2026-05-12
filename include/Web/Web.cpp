@@ -1,5 +1,6 @@
 #include "Web.h"
 
+#include <AppSta.h>
 #include <ESPAsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 
@@ -58,12 +59,17 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .msg{margin-top:.35rem;font-size:.75rem;color:var(--tx2)}
 .quickline{font-size:.88rem;color:var(--tx2);padding:.35rem 0 1rem;line-height:1.55;border-bottom:1px solid var(--bd);margin-bottom:.25rem}
 .quickline strong{color:var(--tx);font-weight:650;font-variant-numeric:tabular-nums}
+.btn-wifi-off{font-size:.72rem;padding:.28rem .55rem;background:var(--card);color:var(--tx2);border:1px solid var(--bd);border-radius:8px;cursor:pointer;font-weight:500}
+.btn-wifi-off:hover{border-color:var(--warn);color:var(--warn)}
 </style>
 </head>
 <body>
 <header>
 <h1>环境监测</h1>
+<div style="display:flex;flex-wrap:wrap;align-items:center;gap:.5rem">
 <span id="wifiBadge" class="badge">WiFi …</span>
+<button type="button" id="btnWifiDisc" class="btn-wifi-off" title="断开 STA；约 10s 内可用串口配网">断开 WiFi</button>
+</div>
 </header>
 <main>
 <p class="quickline" id="quickLine">湿度 <strong>--</strong> · 水位 <strong>--</strong> · 音量 <strong>--</strong>（等待遥测）</p>
@@ -82,7 +88,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
 <summary>原始帧 / JSON（调试）</summary>
 <pre id="rawPre">加载中…</pre>
 </details>
-<footer>GET <code>/api/status</code>；POST <code>/api/settings</code> 下发后需等 STM32 回 <code>0x22</code> ACK（见 <code>doc/esp8266_stm32_link_proto.md</code>）。</footer>
+<footer>GET <code>/api/status</code>；POST <code>/api/settings</code> 下发后需等 STM32 回 <code>0x22</code> ACK；POST <code>/api/wifi/disconnect</code> 断开 STA（见 <code>doc/esp8266_stm32_link_proto.md</code>）。</footer>
 </main>
 <script>
 (function(){
@@ -234,6 +240,15 @@ button:disabled{opacity:.45;cursor:not-allowed}
       else msg.textContent='已发送，等待 0x22 ACK…';
     }catch(e){ msg.textContent=String(e); }
   });
+  document.getElementById('btnWifiDisc').addEventListener('click',async function(){
+    var msg=document.getElementById('setMsg');
+    try{
+      var r=await fetch('/api/wifi/disconnect',{method:'POST'});
+      var j=await r.json();
+      if(j&&j.ok) msg.textContent='已请求断开 WiFi';
+      else msg.textContent=(j&&j.error)||'断开失败';
+    }catch(e){ if(msg) msg.textContent=String(e); }
+  });
   setInterval(tick,1000);
   tick();
 })();
@@ -303,6 +318,11 @@ void webBegin(uint16_t port, WebJsonFn statusJson, WebJsonFn lastFrameJson, WebS
           }
         });
   }
+
+  s_server->on("/api/wifi/disconnect", HTTP_POST, [](AsyncWebServerRequest* request) {
+    appStaUserDisconnect();
+    request->send(200, "application/json; charset=utf-8", F("{\"ok\":true,\"wifi\":\"disconnect_requested\"}"));
+  });
 
   s_server->onNotFound([](AsyncWebServerRequest* request) { request->send(404, "text/plain", "404"); });
 
