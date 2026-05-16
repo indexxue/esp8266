@@ -42,7 +42,7 @@ py -3.11 -m platformio run -t upload
 PlatformIO 会自动选择串口；若多块板或多串口，可指定端口（在设备管理器中查看 **端口 (COM 和 LPT)** 的 COM 号）：
 
 ```powershell
-py -3.11 -m platformio run -t upload --upload-port COM5
+py -3.11 -m platformio run -t upload --upload-port COM3
 ```
 
 也可在 `platformio.ini` 的 `[env:nodemcuv2]` 段增加固定端口，例如：

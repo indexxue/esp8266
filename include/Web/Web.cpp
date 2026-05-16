@@ -1,6 +1,5 @@
 #include "Web.h"
 
-#include <AppSta.h>
 #include <ESPAsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 
@@ -59,17 +58,14 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .msg{margin-top:.35rem;font-size:.75rem;color:var(--tx2)}
 .quickline{font-size:.88rem;color:var(--tx2);padding:.35rem 0 1rem;line-height:1.55;border-bottom:1px solid var(--bd);margin-bottom:.25rem}
 .quickline strong{color:var(--tx);font-weight:650;font-variant-numeric:tabular-nums}
-.btn-wifi-off{font-size:.72rem;padding:.28rem .55rem;background:var(--card);color:var(--tx2);border:1px solid var(--bd);border-radius:8px;cursor:pointer;font-weight:500}
-.btn-wifi-off:hover{border-color:var(--warn);color:var(--warn)}
+.alert-hot{color:#fca5a5;border-color:#f87171;background:rgba(248,113,113,.12)}
+.row-led .meter .bar{background:linear-gradient(90deg,#f472b6,#fb923c)}
 </style>
 </head>
 <body>
 <header>
 <h1>环境监测</h1>
-<div style="display:flex;flex-wrap:wrap;align-items:center;gap:.5rem">
-<span id="wifiBadge" class="badge">WiFi …</span>
-<button type="button" id="btnWifiDisc" class="btn-wifi-off" title="断开 STA；约 10s 内可用串口配网">断开 WiFi</button>
-</div>
+<span id="wifiBadge" class="badge">热点 …</span>
 </header>
 <main>
 <p class="quickline" id="quickLine">湿度 <strong>--</strong> · 水位 <strong>--</strong> · 音量 <strong>--</strong>（等待遥测）</p>
@@ -77,10 +73,27 @@ button:disabled{opacity:.45;cursor:not-allowed}
 <section class="setpanel" id="setPanel">
 <h2 class="panelh">设备设定 <span id="syncTag" class="badge">…</span></h2>
 <div class="row">
-<label class="lbl">目标湿度 %<input type="number" id="inTarget" min="0" max="100" value="50"></label>
-<label class="lbl">运行<input type="checkbox" id="inOn"></label>
-<label class="lbl">挡位<input type="number" id="inGear" min="0" max="255" value="0"></label>
-<button type="button" id="btnApply">下发到 MCU</button>
+<label class="lbl">加湿档位
+<select id="inHumid">
+<option value="0">0 · 关闭</option>
+<option value="1">1 档</option>
+<option value="2">2 档</option>
+<option value="3">3 档</option>
+</select>
+</label>
+<label class="lbl">灯带模式
+<select id="inLed">
+<option value="0">常亮</option>
+<option value="1">呼吸</option>
+<option value="2">流水</option>
+<option value="3">音律</option>
+</select>
+</label>
+</div>
+<div class="row">
+<button type="button" id="btnHumid">仅下发加湿</button>
+<button type="button" id="btnLed">仅下发灯带</button>
+<button type="button" id="btnBoth">一并下发</button>
 </div>
 <p class="msg" id="setMsg"></p>
 </section>
@@ -88,7 +101,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
 <summary>原始帧 / JSON（调试）</summary>
 <pre id="rawPre">加载中…</pre>
 </details>
-<footer>GET <code>/api/status</code>；POST <code>/api/settings</code> 下发后需等 STM32 回 <code>0x22</code> ACK；POST <code>/api/wifi/disconnect</code> 断开 STA（见 <code>doc/esp8266_stm32_link_proto.md</code>）。</footer>
+<footer>GET <code>/api/status</code> 轮询见 <code>sync.poll_interval_ms</code>；POST 支持单控/合包（<code>doc/esp8266_stm32_link_proto.md</code> v2.1）。</footer>
 </main>
 <script>
 (function(){
@@ -115,18 +128,22 @@ button:disabled{opacity:.45;cursor:not-allowed}
   }
   function pillRow(){
     const wrap=el('div',{class:'card',id:'c-device'},[]);
-    wrap.appendChild(el('h2',{},['加湿器']));
+    wrap.appendChild(el('h2',{},['加湿 / 灯带']));
     const line=el('div',{class:'state-pill stop',id:'humState'},[]);
     line.appendChild(el('span',{class:'dot'}));
     line.appendChild(el('span',{id:'humStateTxt'},['读取中…']));
     wrap.appendChild(line);
-    wrap.appendChild(el('div',{class:'sub',id:'gearLine'},['挡位：--']));
+    wrap.appendChild(el('div',{class:'sub',id:'gearLine'},['加湿档位：--']));
+    wrap.appendChild(el('div',{class:'sub',id:'ledLine'},['灯带：--']));
     return wrap;
   }
+  const HUMID_LBL=['关闭','1档','2档','3档'];
+  const LED_LBL=['常亮','呼吸','流水','音律'];
   const board=document.getElementById('board');
   board.appendChild(card('hum','湿度','row-hum'));
   board.appendChild(card('audio','音量','row-audio'));
   board.appendChild(card('water','水位','row-water'));
+  board.appendChild(card('led','灯带','row-led'));
   board.appendChild(pillRow());
   function pct(n,max){const x=Math.max(0,Math.min(max,Number(n)||0));return Math.round(x/max*100);}
   function setMeter(id,v,max){const e=document.getElementById('m-'+id);if(e)e.style.width=pct(v,max)+'%';}
@@ -139,117 +156,141 @@ button:disabled{opacity:.45;cursor:not-allowed}
   function setWifi(d){
     const b=document.getElementById('wifiBadge');
     if(!b)return;
-    if(d.wifi_connected){b.className='badge on';b.textContent='WiFi 已连接 '+d.ip+' · RSSI '+d.rssi+' dBm';}
-    else{b.className='badge';b.textContent='WiFi 未连接';}
+    if(d.wifi_mode==='ap'||d.wifi_connected){
+      const ssid=d.ap_ssid||'热点';
+      const n=(d.ap_clients!=null)?d.ap_clients:0;
+      b.className='badge on';
+      b.textContent='AP '+ssid+' · '+d.ip+' · 客户端 '+n;
+    }else{b.className='badge';b.textContent='热点未就绪';}
   }
   function volFromSensor(s){
     if(!s)return null;
     if(s.volume_level!=null&&s.volume_level!==undefined)return s.volume_level;
     return s.audio_level;
   }
+  function lvlLabel(arr,n){var i=Number(n)||0;return arr[i]!=null?arr[i]:String(n);}
   function updateQuickLine(s){
-    const el=document.getElementById('quickLine');
-    if(!el)return;
+    const q=document.getElementById('quickLine');
+    if(!q)return;
     if(!s||!s.valid){
-      el.innerHTML='湿度 <strong>--</strong> · 水位 <strong>--</strong> · 音量 <strong>--</strong>（等待 0x20 遥测）';
+      q.innerHTML='湿度 <strong>--</strong> · 水位 <strong>--</strong> · 音量 <strong>--</strong>（等待 0x20 遥测）';
       return;
     }
     const v=volFromSensor(s);
     let html='湿度 <strong>'+s.humidity_pct+'%</strong> · 水位 <strong>'+s.water_level_pct+'%</strong> · 音量 <strong>'+String(v)+'</strong>';
-    if(s.target_humidity_pct!=null&&s.target_humidity_pct!==undefined){
-      html+=' · 目标湿度 <strong>'+s.target_humidity_pct+'%</strong>';
-    }
-    el.innerHTML=html;
+    html+=' · 加湿 <strong>'+lvlLabel(HUMID_LBL,s.humidifier_level)+'</strong>';
+    html+=' · 灯带 <strong>'+lvlLabel(LED_LBL,s.led_strip_mode)+'</strong>';
+    if(s.overheat) html+=' · <strong class="alert-hot">过热</strong>';
+    q.innerHTML=html;
   }
   function setDevice(s){
     const line=document.getElementById('humState');
     const txt=document.getElementById('humStateTxt');
     const gear=document.getElementById('gearLine');
+    const ledLn=document.getElementById('ledLine');
     if(!line||!txt||!gear)return;
     if(!s||!s.valid){
       line.className='state-pill stop';
       txt.textContent=(s&&s.reason)?s.reason:'无数据';
-      gear.textContent='挡位：--';
+      gear.textContent='加湿档位：--';
+      if(ledLn)ledLn.textContent='灯带：--';
       setCard('hum','--','%','等待有效遥测帧',0,100);
       setCard('audio','--','','等待有效遥测帧',0,255);
       setCard('water','--','%','等待有效遥测帧',0,100);
+      setCard('led','--','','等待有效遥测帧',0,3);
       updateQuickLine(null);
       return;
     }
-    const on=!!s.humidifier_on;
-    line.className='state-pill '+(on?'run':'stop');
-    txt.textContent=on?'工作中':'已停止';
-    gear.textContent='挡位：'+String(s.gear);
-    var humSub='相对湿度 0–100';
-    if(s.target_humidity_pct!=null&&s.target_humidity_pct!==undefined) humSub+=' · 遥测含目标 '+s.target_humidity_pct+'%';
-    setCard('hum',String(s.humidity_pct),'%',humSub,s.humidity_pct,100);
+    const lv=Number(s.humidifier_level)||0;
+    const run=lv>0;
+    line.className='state-pill '+(run?'run':'stop');
+    txt.textContent=run?('运行 · '+lvlLabel(HUMID_LBL,lv)):lvlLabel(HUMID_LBL,0);
+    gear.textContent='加湿档位：'+lvlLabel(HUMID_LBL,lv)+' ('+lv+')';
+    if(ledLn)ledLn.textContent='灯带：'+lvlLabel(LED_LBL,s.led_strip_mode);
+    setCard('hum',String(s.humidity_pct),'%','相对湿度 0–100',s.humidity_pct,100);
     const vol=volFromSensor(s);
-    setCard('audio',String(vol),'','音量 0–255（越大越强）',vol,255);
-    setCard('water',String(s.water_level_pct),'%','液位/水箱 0–100%',s.water_level_pct,100);
+    setCard('audio',String(vol),'','音量 0–255',vol,255);
+    setCard('water',String(s.water_level_pct),'%','液位 0–100%',s.water_level_pct,100);
+    const lm=Number(s.led_strip_mode)||0;
+    setCard('led',lvlLabel(LED_LBL,lm),'',s.overheat?'设备过热 · 请检查':'模式 0–3',lm,3);
     updateQuickLine(s);
   }
+  var pollMs=800,pollPendMs=400,pollTimer=null,lastPending=false;
+  function pollDelay(d){
+    var sy=d&&d.sync;
+    if(sy&&sy.poll_interval_ms)pollMs=sy.poll_interval_ms;
+    if(sy&&sy.poll_interval_pending_ms)pollPendMs=sy.poll_interval_pending_ms;
+    return (sy&&sy.pending)?pollPendMs:pollMs;
+  }
+  function setBtnsDisabled(on){
+    ['btnHumid','btnLed','btnBoth'].forEach(function(id){
+      var b=document.getElementById(id);if(b)b.disabled=on;
+    });
+  }
   function applyStatusMeta(d){
-    var st=d.settings||{};
-    var sy=d.sync||{};
-    var tgt=document.getElementById('inTarget');
-    var on=document.getElementById('inOn');
-    var gr=document.getElementById('inGear');
+    var st=d.settings||{},sy=d.sync||{};
+    var hum=document.getElementById('inHumid');
+    var led=document.getElementById('inLed');
     var tag=document.getElementById('syncTag');
-    var btn=document.getElementById('btnApply');
     var msg=document.getElementById('setMsg');
-    if(tgt&&st.valid) tgt.value=String(st.target_humidity_pct);
-    if(on&&st.valid) on.checked=!!st.humidifier_on;
-    if(gr&&st.valid) gr.value=String(st.gear);
-    if(btn) btn.disabled=!!(sy&&sy.pending);
+    var pend=!!(sy&&sy.pending);
+    if(!pend&&st.valid){
+      if(hum)hum.value=String(st.humidifier_level!=null?st.humidifier_level:0);
+      if(led)led.value=String(st.led_strip_mode!=null?st.led_strip_mode:0);
+    }
+    setBtnsDisabled(pend);
     if(tag){
-      if(sy&&sy.pending){ tag.textContent='等待 MCU ACK…'; tag.className='badge';}
-      else if(sy&&sy.last_error){ tag.textContent=sy.last_error; tag.className='badge err';}
-      else { tag.textContent='已同步'; tag.className='badge on';}
+      if(pend){tag.textContent='等待 ACK · req '+sy.req_id+' mask 0x'+((sy.change_mask||0).toString(16));tag.className='badge';}
+      else if(sy&&sy.last_error){tag.textContent=sy.last_error;tag.className='badge err';}
+      else{tag.textContent='已同步';tag.className='badge on';}
     }
     if(msg){
-      if(sy&&sy.last_error && !sy.pending) msg.textContent=sy.last_error;
-      else if(sy&&sy.pending&&sy.requested) msg.textContent='已请求 req_id='+sy.req_id+' ，超时见 deadline_ms';
+      if(sy&&sy.last_error&&!pend)msg.textContent=sy.last_error;
+      else if(pend&&sy.requested)msg.textContent='轮询 '+pollPendMs+'ms · 已请求 '+JSON.stringify(sy.requested);
       else msg.textContent='';
     }
+    lastPending=pend;
   }
   async function tick(){
+    var delay=pollMs;
     try{
       const r=await fetch('/api/status',{cache:'no-store'});
-      const t=await r.text();
-      const d=JSON.parse(t);
+      const d=JSON.parse(await r.text());
       setWifi(d);
       setDevice(d.sensor);
       applyStatusMeta(d);
       document.getElementById('rawPre').textContent=JSON.stringify(d,null,2);
+      delay=pollDelay(d);
     }catch(e){
       document.getElementById('rawPre').textContent=String(e);
       updateQuickLine(null);
+      delay=lastPending?pollPendMs:pollMs;
     }
+    if(pollTimer)clearTimeout(pollTimer);
+    pollTimer=setTimeout(tick,delay);
   }
-  document.getElementById('btnApply').addEventListener('click',async function(){
+  async function postSettings(body){
     var msg=document.getElementById('setMsg');
     try{
-      var body={
-        target_humidity_pct:parseInt(document.getElementById('inTarget').value,10)||0,
-        humidifier_on:document.getElementById('inOn').checked,
-        gear:parseInt(document.getElementById('inGear').value,10)||0
-      };
       var r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
       var j=await r.json();
-      if(!j.ok) msg.textContent=j.error||'失败';
-      else msg.textContent='已发送，等待 0x22 ACK…';
-    }catch(e){ msg.textContent=String(e); }
+      if(!j.ok){msg.textContent=j.error||'失败';return;}
+      msg.textContent='已发送 mask=0x'+(j.change_mask!=null?j.change_mask.toString(16):'?')+' · 等待 0x22';
+      tick();
+    }catch(e){msg.textContent=String(e);}
+  }
+  document.getElementById('btnHumid').addEventListener('click',function(){
+    postSettings({humidifier_level:parseInt(document.getElementById('inHumid').value,10)||0});
   });
-  document.getElementById('btnWifiDisc').addEventListener('click',async function(){
-    var msg=document.getElementById('setMsg');
-    try{
-      var r=await fetch('/api/wifi/disconnect',{method:'POST'});
-      var j=await r.json();
-      if(j&&j.ok) msg.textContent='已请求断开 WiFi';
-      else msg.textContent=(j&&j.error)||'断开失败';
-    }catch(e){ if(msg) msg.textContent=String(e); }
+  document.getElementById('btnLed').addEventListener('click',function(){
+    postSettings({led_strip_mode:parseInt(document.getElementById('inLed').value,10)||0});
   });
-  setInterval(tick,1000);
+  document.getElementById('btnBoth').addEventListener('click',function(){
+    postSettings({
+      humidifier_level:parseInt(document.getElementById('inHumid').value,10)||0,
+      led_strip_mode:parseInt(document.getElementById('inLed').value,10)||0
+    });
+  });
   tick();
 })();
 </script>
@@ -318,11 +359,6 @@ void webBegin(uint16_t port, WebJsonFn statusJson, WebJsonFn lastFrameJson, WebS
           }
         });
   }
-
-  s_server->on("/api/wifi/disconnect", HTTP_POST, [](AsyncWebServerRequest* request) {
-    appStaUserDisconnect();
-    request->send(200, "application/json; charset=utf-8", F("{\"ok\":true,\"wifi\":\"disconnect_requested\"}"));
-  });
 
   s_server->onNotFound([](AsyncWebServerRequest* request) { request->send(404, "text/plain", "404"); });
 

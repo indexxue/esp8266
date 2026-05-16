@@ -12,27 +12,23 @@ bool s_telemOk = false;
 uint8_t s_tHum = 0;
 uint8_t s_tAudio = 0;
 uint8_t s_tWater = 0;
-uint8_t s_tRunOn = 0;
-uint8_t s_tGear = 0;
-bool s_tHasTarget = false;
-uint8_t s_tTarget = 0;
+uint8_t s_tHumidLevel = 0;
+uint8_t s_tLedMode = 0;
+bool s_tOverheat = false;
 
 bool s_dispValid = false;
-uint8_t s_dispTarget = 50;
-bool s_dispOn = false;
-uint8_t s_dispGear = 0;
+uint8_t s_dispHumidLevel = 0;
+uint8_t s_dispLedMode = 0;
 
 bool s_pend = false;
 uint8_t s_pendReqId = 0;
+uint8_t s_pendMask = 0;
 uint32_t s_pendDeadlineMs = 0;
-uint8_t s_pendTgt = 0;
-bool s_pendOn = false;
-uint8_t s_pendGear = 0;
+uint8_t s_pendHumidLevel = 0;
+uint8_t s_pendLedMode = 0;
 
 String s_lastErr;
 uint8_t s_nextReqId = 1;
-
-constexpr uint32_t kSetAckTimeoutMs = 4000;
 
 void bumpReqId() {
   uint8_t n = static_cast<uint8_t>(s_nextReqId + 1u);
@@ -46,34 +42,6 @@ static void skipWs(const char* p, size_t n, size_t* i) {
   while (*i < n && (p[*i] == ' ' || p[*i] == '\t' || p[*i] == '\r' || p[*i] == '\n')) {
     ++(*i);
   }
-}
-
-bool jsonFindBool(const String& body, const char* key, bool* outFound, bool* outVal) {
-  *outFound = false;
-  const int pos = body.indexOf(key);
-  if (pos < 0) {
-    return true;
-  }
-  size_t i = static_cast<size_t>(pos) + strlen(key);
-  const char* p = body.c_str();
-  const size_t n = body.length();
-  skipWs(p, n, &i);
-  if (i >= n || p[i] != ':') {
-    return false;
-  }
-  ++i;
-  skipWs(p, n, &i);
-  if (i + 3 < n && p[i] == 't' && p[i + 1] == 'r' && p[i + 2] == 'u' && p[i + 3] == 'e') {
-    *outFound = true;
-    *outVal = true;
-    return true;
-  }
-  if (i + 4 < n && p[i] == 'f' && p[i + 1] == 'a' && p[i + 2] == 'l' && p[i + 3] == 's' && p[i + 4] == 'e') {
-    *outFound = true;
-    *outVal = false;
-    return true;
-  }
-  return false;
 }
 
 bool jsonFindInt(const String& body, const char* key, bool* outFound, int* outVal) {
@@ -112,38 +80,42 @@ bool jsonFindInt(const String& body, const char* key, bool* outFound, int* outVa
   return true;
 }
 
-uint8_t clampU8(int v, int lo, int hi) {
-  if (v < lo) {
-    return static_cast<uint8_t>(lo);
+uint8_t clampLevel03(int v) {
+  if (v < 0) {
+    return 0;
   }
-  if (v > hi) {
-    return static_cast<uint8_t>(hi);
+  if (v > 3) {
+    return 3;
   }
   return static_cast<uint8_t>(v);
 }
 
 void applyTelemetryToCache(const uint8_t* p, uint16_t len) {
-  if (len < 5) {
+  if (len != 6) {
     return;
   }
   s_tHum = p[0];
   s_tAudio = p[1];
   s_tWater = p[2];
-  s_tRunOn = p[3];
-  s_tGear = p[4];
-  s_tHasTarget = (len >= 6);
-  if (s_tHasTarget) {
-    s_tTarget = p[5];
-  }
+  s_tHumidLevel = clampLevel03(p[3]);
+  s_tLedMode = clampLevel03(p[4]);
+  s_tOverheat = ((p[5] & 0x01) != 0);
   s_telemOk = true;
 
   if (!s_pend) {
-    if (s_tHasTarget) {
-      s_dispTarget = s_tTarget;
-    }
-    s_dispOn = (s_tRunOn != 0);
-    s_dispGear = s_tGear;
+    s_dispHumidLevel = s_tHumidLevel;
+    s_dispLedMode = s_tLedMode;
     s_dispValid = true;
+  }
+}
+
+void appendJsonEscaped(String& j, const String& s) {
+  for (unsigned i = 0; i < static_cast<unsigned>(s.length()); ++i) {
+    const char c = s[static_cast<int>(i)];
+    if (c == '"' || c == '\\') {
+      j += '\\';
+    }
+    j += c;
   }
 }
 
@@ -153,10 +125,10 @@ void tyDeviceCommBegin() {
   s_io = nullptr;
   s_telemOk = false;
   s_dispValid = false;
-  s_dispTarget = 50;
-  s_dispOn = false;
-  s_dispGear = 0;
+  s_dispHumidLevel = 0;
+  s_dispLedMode = 0;
   s_pend = false;
+  s_pendMask = 0;
   s_lastErr = "";
   s_nextReqId = 1;
 }
@@ -176,9 +148,8 @@ void tyDeviceCommOnTyFrame(uint8_t cmd, const uint8_t* payload, uint16_t len) {
     if (s_pend && rid == s_pendReqId) {
       if (st == 0) {
         s_pend = false;
-        s_dispTarget = payload[2];
-        s_dispOn = (payload[3] != 0);
-        s_dispGear = payload[4];
+        s_dispHumidLevel = clampLevel03(payload[3]);
+        s_dispLedMode = clampLevel03(payload[4]);
         s_dispValid = true;
         s_lastErr = "";
       } else {
@@ -214,14 +185,12 @@ void tyDeviceCommAppendSensorSettingsSyncJson(String& j) {
     j += String(s_tAudio);
     j += F(",\"water_level_pct\":");
     j += String(s_tWater);
-    j += F(",\"humidifier_on\":");
-    j += (s_tRunOn != 0) ? F("true") : F("false");
-    j += F(",\"gear\":");
-    j += String(s_tGear);
-    if (s_tHasTarget) {
-      j += F(",\"target_humidity_pct\":");
-      j += String(s_tTarget);
-    }
+    j += F(",\"humidifier_level\":");
+    j += String(s_tHumidLevel);
+    j += F(",\"led_strip_mode\":");
+    j += String(s_tLedMode);
+    j += F(",\"overheat\":");
+    j += s_tOverheat ? F("true") : F("false");
     j += '}';
   }
 
@@ -230,12 +199,10 @@ void tyDeviceCommAppendSensorSettingsSyncJson(String& j) {
     j += F("\"valid\":false");
     j += '}';
   } else {
-    j += F("\"valid\":true,\"target_humidity_pct\":");
-    j += String(s_dispTarget);
-    j += F(",\"humidifier_on\":");
-    j += s_dispOn ? F("true") : F("false");
-    j += F(",\"gear\":");
-    j += String(s_dispGear);
+    j += F("\"valid\":true,\"humidifier_level\":");
+    j += String(s_dispHumidLevel);
+    j += F(",\"led_strip_mode\":");
+    j += String(s_dispLedMode);
     j += '}';
   }
 
@@ -244,24 +211,31 @@ void tyDeviceCommAppendSensorSettingsSyncJson(String& j) {
   j += s_pend ? F("true") : F("false");
   j += F(",\"req_id\":");
   j += String(s_pend ? static_cast<unsigned>(s_pendReqId) : 0u);
+  j += F(",\"change_mask\":");
+  j += String(s_pend ? static_cast<unsigned>(s_pendMask) : 0u);
   j += F(",\"deadline_ms\":");
   j += String(s_pend ? s_pendDeadlineMs : 0u);
   j += F(",\"last_error\":\"");
-  for (unsigned i = 0; i < static_cast<unsigned>(s_lastErr.length()); ++i) {
-    const char c = s_lastErr[static_cast<int>(i)];
-    if (c == '"' || c == '\\') {
-      j += '\\';
-    }
-    j += c;
-  }
-  j += F("\"");
+  appendJsonEscaped(j, s_lastErr);
+  j += F("\",\"poll_interval_ms\":");
+  j += String(kTyWebPollIntervalMs);
+  j += F(",\"poll_interval_pending_ms\":");
+  j += String(kTyWebPollPendingMs);
   if (s_pend) {
-    j += F(",\"requested\":{\"target_humidity_pct\":");
-    j += String(s_pendTgt);
-    j += F(",\"humidifier_on\":");
-    j += s_pendOn ? F("true") : F("false");
-    j += F(",\"gear\":");
-    j += String(s_pendGear);
+    j += F(",\"requested\":{");
+    bool first = true;
+    if ((s_pendMask & kTyChgHumid) != 0) {
+      j += F("\"humidifier_level\":");
+      j += String(s_pendHumidLevel);
+      first = false;
+    }
+    if ((s_pendMask & kTyChgLed) != 0) {
+      if (!first) {
+        j += ',';
+      }
+      j += F("\"led_strip_mode\":");
+      j += String(s_pendLedMode);
+    }
     j += '}';
   }
   j += '}';
@@ -275,49 +249,53 @@ String tyDeviceCommHandleSettingsPost(const String& body) {
     return F("{\"ok\":false,\"error\":\"pending\"}");
   }
 
-  bool fT = false, fO = false, fG = false;
-  int vT = 0, vG = 0;
-  bool vO = false;
-  if (!jsonFindInt(body, "\"target_humidity_pct\"", &fT, &vT)) {
+  bool fH = false;
+  bool fL = false;
+  int vH = 0;
+  int vL = 0;
+  if (!jsonFindInt(body, "\"humidifier_level\"", &fH, &vH)) {
     return F("{\"ok\":false,\"error\":\"bad_json\"}");
   }
-  if (!jsonFindBool(body, "\"humidifier_on\"", &fO, &vO)) {
+  if (!jsonFindInt(body, "\"led_strip_mode\"", &fL, &vL)) {
     return F("{\"ok\":false,\"error\":\"bad_json\"}");
   }
-  if (!jsonFindInt(body, "\"gear\"", &fG, &vG)) {
-    return F("{\"ok\":false,\"error\":\"bad_json\"}");
-  }
-  if (!fT && !fO && !fG) {
+  if (!fH && !fL) {
     return F("{\"ok\":false,\"error\":\"empty\"}");
   }
 
-  const uint8_t baseT = s_dispValid ? s_dispTarget : 50;
-  const bool baseO = s_dispValid ? s_dispOn : false;
-  const uint8_t baseG = s_dispValid ? s_dispGear : 0;
-
-  const uint8_t tgt = clampU8(fT ? vT : static_cast<int>(baseT), 0, 100);
-  const bool on = fO ? vO : baseO;
-  const uint8_t gear = clampU8(fG ? vG : static_cast<int>(baseG), 0, 255);
+  uint8_t mask = 0;
+  uint8_t hum = 0;
+  uint8_t led = 0;
+  if (fH) {
+    mask |= kTyChgHumid;
+    hum = clampLevel03(vH);
+  }
+  if (fL) {
+    mask |= kTyChgLed;
+    led = clampLevel03(vL);
+  }
 
   const uint8_t rid = s_nextReqId;
-  const uint8_t pl[4] = {rid, tgt, static_cast<uint8_t>(on ? 1u : 0u), gear};
+  const uint8_t pl[4] = {rid, mask, hum, led};
   if (!tySerialFrameSend(*s_io, kTyCmdSetRequest, pl, 4)) {
     return F("{\"ok\":false,\"error\":\"send_failed\"}");
   }
 
   s_pend = true;
   s_pendReqId = rid;
-  s_pendDeadlineMs = millis() + kSetAckTimeoutMs;
-  s_pendTgt = tgt;
-  s_pendOn = on;
-  s_pendGear = gear;
+  s_pendMask = mask;
+  s_pendDeadlineMs = millis() + kTySetAckTimeoutMs;
+  s_pendHumidLevel = hum;
+  s_pendLedMode = led;
   s_lastErr = "";
   bumpReqId();
 
   String r;
-  r.reserve(96);
+  r.reserve(128);
   r += F("{\"ok\":true,\"req_id\":");
   r += String(rid);
+  r += F(",\"change_mask\":");
+  r += String(static_cast<unsigned>(mask));
   r += F(",\"note\":\"wait_for_cmd_0x22\"}");
   return r;
 }

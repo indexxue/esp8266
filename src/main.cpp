@@ -1,44 +1,27 @@
 /**
- * Example: STA (flash creds + serial CLI) + reconnect + async web + binary UART frames.
- * While offline, Serial runs text provisioning; when online, CLI is off and TySerialFrame owns Serial.
+ * Example: SoftAP hotspot + async web + binary UART frames.
+ * Phone/PC connects to the device AP, then opens http://192.168.4.1/
  */
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 
-#include <AppSta.h>
 #include <Web.h>
 #include <TyDeviceComm.h>
 #include <TySerialFrame.h>
-#include <WifiSerialProv.h>
 
 namespace {
 
-constexpr uint16_t kEepromBytes = 256;
+constexpr char kApSsid[] = "TY-ESP8266";
+constexpr char kApPass[] = "12345678";  // min 8 chars; use "" for open AP
 
 void ledTick() {
   static uint32_t t0 = 0;
   const uint32_t now = millis();
-  const uint32_t interval = (WiFi.status() == WL_CONNECTED) ? 1000u : 200u;
-  if (now - t0 >= interval) {
+  if (now - t0 >= 1000u) {
     t0 = now;
     digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
   }
 }
-
-void logWifiStatusIfChanged() {
-  static wl_status_t last = WL_IDLE_STATUS;
-  const wl_status_t cur = WiFi.status();
-  if (cur == last) {
-    return;
-  }
-  last = cur;
-  Serial.printf("[WiFi] status -> %d\n", static_cast<int>(cur));
-  if (cur == WL_CONNECTED) {
-    Serial.printf("Connected, IP %s\n", WiFi.localIP().toString().c_str());
-  }
-}
-
-bool s_webStarted = false;
 
 void onTyFrame(uint8_t cmd, const uint8_t* payload, uint16_t len, void* /*user*/) {
   tyDeviceCommOnTyFrame(cmd, payload, len);
@@ -89,15 +72,13 @@ void appendLastFrameThenDeviceJson(String& j) {
 String makeStatusJson() {
   String j;
   j.reserve(1200);
-  j += F("{\"wifi_connected\":");
-  j += (WiFi.status() == WL_CONNECTED) ? F("true") : F("false");
-  j += F(",\"ip\":\"");
-  if (WiFi.status() == WL_CONNECTED) {
-    j += WiFi.localIP().toString();
-  }
-  j += F("\",\"rssi\":");
-  j += String(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0);
-  j += F(",\"heap\":");
+  j += F("{\"wifi_mode\":\"ap\",\"ap_ssid\":\"");
+  j += kApSsid;
+  j += F("\",\"wifi_connected\":true,\"ip\":\"");
+  j += WiFi.softAPIP().toString();
+  j += F("\",\"ap_clients\":");
+  j += String(WiFi.softAPgetStationNum());
+  j += F(",\"rssi\":0,\"heap\":");
   j += String(ESP.getFreeHeap());
   j += F(",\"up_ms\":");
   j += String(millis());
@@ -105,8 +86,6 @@ String makeStatusJson() {
   j += String(tySerialFrameOkCount());
   j += F(",\"frames_crc_err\":");
   j += String(tySerialFrameCrcErrCount());
-  j += F(",\"prov_enabled\":");
-  j += wifiSerialProvIsEnabled() ? F("true") : F("false");
   appendLastFrameThenDeviceJson(j);
   j += '}';
   return j;
@@ -145,52 +124,32 @@ void setup() {
   delay(200);
   Serial.println();
 
-  if (!wifiStaStoreBegin(kEepromBytes)) {
-    Serial.println(F("ERR: wifiStaStoreBegin failed"));
-  }
-
-  wifiSerialProvBegin(Serial);
-  wifiSerialProvPrintHelp();
-
   tyDeviceCommBegin();
   tySerialFrameBegin(onTyFrame, nullptr);
+  tyDeviceCommSetStream(&Serial);
 
   pinMode(LED_BUILTIN, OUTPUT);
 
-  if (!wifiSerialProvAutoloadAndConnect()) {
-    Serial.println(F("No valid WiFi config in flash — use SSID, PASS, then SAVE"));
-    WiFi.mode(WIFI_STA);
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_AP);
+  const bool apOk = (kApPass[0] != '\0') ? WiFi.softAP(kApSsid, kApPass) : WiFi.softAP(kApSsid);
+  if (!apOk) {
+    Serial.println(F("ERR: softAP start failed"));
   }
+  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
+
+  webBegin(80, makeStatusJson, makeLastFrameJson, handleSettingsPost);
+
+  Serial.printf("\n[AP] SSID: %s  IP: %s\n", kApSsid, WiFi.softAPIP().toString().c_str());
+  if (kApPass[0] != '\0') {
+    Serial.printf("[AP] Password: %s\n", kApPass);
+  }
+  Serial.println(F("[HTTP] Connect to AP, then open http://192.168.4.1/\n"));
 }
 
 void loop() {
-  const bool online = (WiFi.status() == WL_CONNECTED);
-
-  if (!online) {
-    tyDeviceCommSetStream(nullptr);
-    wifiSerialProvSetEnabled(true);
-    wifiSerialProvPoll();
-  } else {
-    tyDeviceCommSetStream(&Serial);
-    if (wifiSerialProvIsEnabled()) {
-      wifiSerialProvSetEnabled(false);
-      while (Serial.available() > 0) {
-        (void)Serial.read();
-      }
-      tySerialFrameResetParser();
-    }
-    tySerialFramePoll(Serial);
-
-    if (!s_webStarted) {
-      webBegin(80, makeStatusJson, makeLastFrameJson, handleSettingsPost);
-      s_webStarted = true;
-      Serial.printf("\n[HTTP] Open http://%s/ in browser\n\n", WiFi.localIP().toString().c_str());
-    }
-  }
-
+  tySerialFramePoll(Serial);
   tyDeviceCommPoll(millis());
-  appStaLoop();
-  logWifiStatusIfChanged();
   ledTick();
   yield();
 }
