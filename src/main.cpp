@@ -14,6 +14,25 @@ namespace {
 constexpr char kApSsid[] = "TY-ESP8266";
 constexpr char kApPass[] = "12345678";  // min 8 chars; use "" for open AP
 
+/** 有终端连上 SoftAP 时拉低；全部断开时恢复高电平（GPIO12 上电须为高，勿改启动态） */
+constexpr uint8_t kApClientGpio = 12;
+
+void onApStationConnected(const WiFiEventSoftAPModeStationConnected& evt) {
+  digitalWrite(kApClientGpio, LOW);
+  Serial.printf("[AP] station joined aid=%u mac=%02X:%02X:%02X:%02X:%02X:%02X -> GPIO12 LOW\n",
+                static_cast<unsigned>(evt.aid), evt.mac[0], evt.mac[1], evt.mac[2], evt.mac[3], evt.mac[4],
+                evt.mac[5]);
+}
+
+void onApStationDisconnected(const WiFiEventSoftAPModeStationDisconnected& evt) {
+  if (WiFi.softAPgetStationNum() == 0) {
+    digitalWrite(kApClientGpio, HIGH);
+    Serial.printf("[AP] last station left aid=%u mac=%02X:%02X:%02X:%02X:%02X:%02X -> GPIO12 HIGH\n",
+                  static_cast<unsigned>(evt.aid), evt.mac[0], evt.mac[1], evt.mac[2], evt.mac[3], evt.mac[4],
+                  evt.mac[5]);
+  }
+}
+
 void ledTick() {
   static uint32_t t0 = 0;
   const uint32_t now = millis();
@@ -129,9 +148,13 @@ void setup() {
   tyDeviceCommSetStream(&Serial);
 
   pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(kApClientGpio, OUTPUT);
+  digitalWrite(kApClientGpio, HIGH);
 
   WiFi.persistent(false);
   WiFi.mode(WIFI_AP);
+  WiFi.onSoftAPModeStationConnected(onApStationConnected);
+  WiFi.onSoftAPModeStationDisconnected(onApStationDisconnected);
   const bool apOk = (kApPass[0] != '\0') ? WiFi.softAP(kApSsid, kApPass) : WiFi.softAP(kApSsid);
   if (!apOk) {
     Serial.println(F("ERR: softAP start failed"));

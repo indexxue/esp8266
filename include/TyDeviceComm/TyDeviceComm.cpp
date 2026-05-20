@@ -101,12 +101,7 @@ void applyTelemetryToCache(const uint8_t* p, uint16_t len) {
   s_tLedMode = clampLevel03(p[4]);
   s_tOverheat = ((p[5] & 0x01) != 0);
   s_telemOk = true;
-
-  if (!s_pend) {
-    s_dispHumidLevel = s_tHumidLevel;
-    s_dispLedMode = s_tLedMode;
-    s_dispValid = true;
-  }
+  /* settings（s_disp*）仅由 POST / 0x22 更新，勿用遥测覆盖 */
 }
 
 void appendJsonEscaped(String& j, const String& s) {
@@ -264,8 +259,9 @@ String tyDeviceCommHandleSettingsPost(const String& body) {
   }
 
   uint8_t mask = 0;
-  uint8_t hum = 0;
-  uint8_t led = 0;
+  /* 未参与本次 mask 的字节填当前缓存值，避免 MCU 误用 0 把另一项关掉 */
+  uint8_t hum = s_dispValid ? s_dispHumidLevel : (s_telemOk ? s_tHumidLevel : 0u);
+  uint8_t led = s_dispValid ? s_dispLedMode : (s_telemOk ? s_tLedMode : 0u);
   if (fH) {
     mask |= kTyChgHumid;
     hum = clampLevel03(vH);
@@ -287,6 +283,13 @@ String tyDeviceCommHandleSettingsPost(const String& body) {
   s_pendDeadlineMs = millis() + kTySetAckTimeoutMs;
   s_pendHumidLevel = hum;
   s_pendLedMode = led;
+  if ((mask & kTyChgHumid) != 0) {
+    s_dispHumidLevel = hum;
+  }
+  if ((mask & kTyChgLed) != 0) {
+    s_dispLedMode = led;
+  }
+  s_dispValid = true;
   s_lastErr = "";
   bumpReqId();
 

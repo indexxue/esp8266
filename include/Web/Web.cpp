@@ -59,6 +59,11 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .quickline{font-size:.88rem;color:var(--tx2);padding:.35rem 0 1rem;line-height:1.55;border-bottom:1px solid var(--bd);margin-bottom:.25rem}
 .quickline strong{color:var(--tx);font-weight:650;font-variant-numeric:tabular-nums}
 .alert-hot{color:#fca5a5;border-color:#f87171;background:rgba(248,113,113,.12)}
+.alert-water{color:var(--warn)}
+.banner-water{display:none;margin:0 1rem 0;max-width:56rem;margin-left:auto;margin-right:auto;padding:.65rem 1rem;border-radius:10px;border:1px solid var(--warn);background:rgba(240,193,75,.12);color:var(--warn);font-size:.88rem;font-weight:600;text-align:center}
+.banner-water.show{display:block}
+.row-water.low{border-color:var(--warn)}
+.row-water.low .meter .bar{background:linear-gradient(90deg,var(--warn),#f59e0b)}
 .row-led .meter .bar{background:linear-gradient(90deg,#f472b6,#fb923c)}
 </style>
 </head>
@@ -68,6 +73,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
 <span id="wifiBadge" class="badge">热点 …</span>
 </header>
 <main>
+<div id="waterLowBanner" class="banner-water" role="alert">水位过低请加水</div>
 <p class="quickline" id="quickLine">湿度 <strong>--</strong> · 水位 <strong>--</strong> · 音量 <strong>--</strong>（等待遥测）</p>
 <div class="grid" id="board"></div>
 <section class="setpanel" id="setPanel">
@@ -139,6 +145,15 @@ button:disabled{opacity:.45;cursor:not-allowed}
   }
   const HUMID_LBL=['关闭','1档','2档','3档'];
   const LED_LBL=['常亮','呼吸','流水','音律'];
+  const WATER_LOW_PCT=25;
+  function isWaterLow(s){return !!(s&&s.valid&&(Number(s.water_level_pct)||0)<WATER_LOW_PCT);}
+  function setWaterLowUi(s){
+    const low=isWaterLow(s);
+    const banner=document.getElementById('waterLowBanner');
+    const card=document.querySelector('.row-water');
+    if(banner)banner.classList.toggle('show',low);
+    if(card)card.classList.toggle('low',low);
+  }
   const board=document.getElementById('board');
   board.appendChild(card('hum','湿度','row-hum'));
   board.appendChild(card('audio','音量','row-audio'));
@@ -180,6 +195,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
     let html='湿度 <strong>'+s.humidity_pct+'%</strong> · 水位 <strong>'+s.water_level_pct+'%</strong> · 音量 <strong>'+String(v)+'</strong>';
     html+=' · 加湿 <strong>'+lvlLabel(HUMID_LBL,s.humidifier_level)+'</strong>';
     html+=' · 灯带 <strong>'+lvlLabel(LED_LBL,s.led_strip_mode)+'</strong>';
+    if(isWaterLow(s)) html+=' · <strong class="alert-water">水位过低请加水</strong>';
     if(s.overheat) html+=' · <strong class="alert-hot">过热</strong>';
     q.innerHTML=html;
   }
@@ -198,24 +214,27 @@ button:disabled{opacity:.45;cursor:not-allowed}
       setCard('audio','--','','等待有效遥测帧',0,255);
       setCard('water','--','%','等待有效遥测帧',0,100);
       setCard('led','--','','等待有效遥测帧',0,3);
+      setWaterLowUi(null);
       updateQuickLine(null);
       return;
     }
     const lv=Number(s.humidifier_level)||0;
+    const lm=Number(s.led_strip_mode)||0;
     const run=lv>0;
     line.className='state-pill '+(run?'run':'stop');
     txt.textContent=run?('运行 · '+lvlLabel(HUMID_LBL,lv)):lvlLabel(HUMID_LBL,0);
-    gear.textContent='加湿档位：'+lvlLabel(HUMID_LBL,lv)+' ('+lv+')';
-    if(ledLn)ledLn.textContent='灯带：'+lvlLabel(LED_LBL,s.led_strip_mode);
+    gear.textContent='加湿档位：'+lvlLabel(HUMID_LBL,lv)+' ('+lv+') · 设备遥测';
+    if(ledLn)ledLn.textContent='灯带：'+lvlLabel(LED_LBL,lm)+' · 设备遥测';
     setCard('hum',String(s.humidity_pct),'%','相对湿度 0–100',s.humidity_pct,100);
     const vol=volFromSensor(s);
     setCard('audio',String(vol),'','音量 0–255',vol,255);
-    setCard('water',String(s.water_level_pct),'%','液位 0–100%',s.water_level_pct,100);
-    const lm=Number(s.led_strip_mode)||0;
-    setCard('led',lvlLabel(LED_LBL,lm),'',s.overheat?'设备过热 · 请检查':'模式 0–3',lm,3);
+    const waterLow=isWaterLow(s);
+    setCard('water',String(s.water_level_pct),'%',waterLow?'水位过低请加水':'液位 0–100%',s.water_level_pct,100);
+    setCard('led',lvlLabel(LED_LBL,lm),'',s.overheat?'设备过热 · 请检查':'灯带模式 · 设备遥测',lm,3);
+    setWaterLowUi(s);
     updateQuickLine(s);
   }
-  var pollMs=800,pollPendMs=400,pollTimer=null,lastPending=false;
+  var pollMs=800,pollPendMs=400,pollTimer=null,lastPending=false,formDirty=false;
   function pollDelay(d){
     var sy=d&&d.sync;
     if(sy&&sy.poll_interval_ms)pollMs=sy.poll_interval_ms;
@@ -227,6 +246,21 @@ button:disabled{opacity:.45;cursor:not-allowed}
       var b=document.getElementById(id);if(b)b.disabled=on;
     });
   }
+  function syncSelectsFromServer(d,force){
+    var hum=document.getElementById('inHumid');
+    var led=document.getElementById('inLed');
+    var st=d.settings||{};
+    var sy=d.sync||{};
+    if(!st.valid&&!sy.pending)return;
+    if(sy.pending&&sy.requested){
+      if(sy.requested.humidifier_level!=null&&hum)hum.value=String(sy.requested.humidifier_level);
+      if(sy.requested.led_strip_mode!=null&&led)led.value=String(sy.requested.led_strip_mode);
+    }else if(st.valid){
+      if(hum)hum.value=String(st.humidifier_level!=null?st.humidifier_level:0);
+      if(led)led.value=String(st.led_strip_mode!=null?st.led_strip_mode:0);
+    }
+    if(force)formDirty=false;
+  }
   function applyStatusMeta(d){
     var st=d.settings||{},sy=d.sync||{};
     var hum=document.getElementById('inHumid');
@@ -234,9 +268,10 @@ button:disabled{opacity:.45;cursor:not-allowed}
     var tag=document.getElementById('syncTag');
     var msg=document.getElementById('setMsg');
     var pend=!!(sy&&sy.pending);
-    if(!pend&&st.valid){
-      if(hum)hum.value=String(st.humidifier_level!=null?st.humidifier_level:0);
-      if(led)led.value=String(st.led_strip_mode!=null?st.led_strip_mode:0);
+    var justAcked=lastPending&&!pend;
+    if(justAcked)formDirty=false;
+    if(!pend&&(justAcked||!formDirty)){
+      syncSelectsFromServer(d,justAcked);
     }
     setBtnsDisabled(pend);
     if(tag){
@@ -263,6 +298,7 @@ button:disabled{opacity:.45;cursor:not-allowed}
       delay=pollDelay(d);
     }catch(e){
       document.getElementById('rawPre').textContent=String(e);
+      setWaterLowUi(null);
       updateQuickLine(null);
       delay=lastPending?pollPendMs:pollMs;
     }
@@ -275,10 +311,13 @@ button:disabled{opacity:.45;cursor:not-allowed}
       var r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
       var j=await r.json();
       if(!j.ok){msg.textContent=j.error||'失败';return;}
+      formDirty=false;
       msg.textContent='已发送 mask=0x'+(j.change_mask!=null?j.change_mask.toString(16):'?')+' · 等待 0x22';
       tick();
     }catch(e){msg.textContent=String(e);}
   }
+  document.getElementById('inHumid').addEventListener('change',function(){formDirty=true;});
+  document.getElementById('inLed').addEventListener('change',function(){formDirty=true;});
   document.getElementById('btnHumid').addEventListener('click',function(){
     postSettings({humidifier_level:parseInt(document.getElementById('inHumid').value,10)||0});
   });
